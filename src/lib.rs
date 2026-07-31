@@ -6,6 +6,8 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
 
+const EXPECTED_STANDALONE_ROOT_ENTRIES: &[&str] = &["current", "releases", "install.lock"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheScan {
     pub codex_root: PathBuf,
@@ -603,7 +605,7 @@ fn warn_about_unexpected_layout(checks: &mut Vec<VerificationCheck>, standalone_
 
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name != "current" && name != "releases" {
+        if !is_expected_standalone_root_entry(&name) {
             warning_check(
                 checks,
                 format!(
@@ -613,6 +615,10 @@ fn warn_about_unexpected_layout(checks: &mut Vec<VerificationCheck>, standalone_
             );
         }
     }
+}
+
+fn is_expected_standalone_root_entry(name: &str) -> bool {
+    EXPECTED_STANDALONE_ROOT_ENTRIES.contains(&name)
 }
 
 fn path_is_inside(path: &Path, directory: &Path) -> bool {
@@ -1055,6 +1061,15 @@ mod tests {
     fn verify_valid_installation_reports_success_summary() {
         let directory = tempfile::tempdir().unwrap();
         write_release(directory.path(), "0.145.0-x86_64-unknown-linux-musl", 30);
+        fs::write(
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("install.lock"),
+            b"",
+        )
+        .unwrap();
         symlink(
             "releases/0.145.0-x86_64-unknown-linux-musl",
             directory
@@ -1170,7 +1185,41 @@ mod tests {
     }
 
     #[test]
-    fn verify_unexpected_layout_reports_warning_only() {
+    fn verify_unknown_file_under_standalone_root_reports_warning_only() {
+        let directory = tempfile::tempdir().unwrap();
+        write_release(directory.path(), "0.145.0-x86_64-unknown-linux-musl", 30);
+        fs::write(
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("notes.txt"),
+            b"",
+        )
+        .unwrap();
+        symlink(
+            "releases/0.145.0-x86_64-unknown-linux-musl",
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("current"),
+        )
+        .unwrap();
+
+        let report = verify_at(directory.path());
+
+        assert!(has_warning(
+            &report,
+            "unexpected entry under standalone root"
+        ));
+        assert!(has_warning(&report, "notes.txt"));
+        assert_eq!(report.warning_count(), 1);
+        assert_eq!(report.error_count(), 0);
+    }
+
+    #[test]
+    fn verify_unknown_directory_under_standalone_root_reports_warning_only() {
         let directory = tempfile::tempdir().unwrap();
         write_release(directory.path(), "0.145.0-x86_64-unknown-linux-musl", 30);
         fs::create_dir_all(
@@ -1197,6 +1246,47 @@ mod tests {
             &report,
             "unexpected entry under standalone root"
         ));
+        assert!(has_warning(&report, "scratch"));
+        assert_eq!(report.warning_count(), 1);
+        assert_eq!(report.error_count(), 0);
+    }
+
+    #[test]
+    fn verify_mixed_expected_and_unexpected_standalone_entries_only_warns_for_unexpected() {
+        let directory = tempfile::tempdir().unwrap();
+        write_release(directory.path(), "0.145.0-x86_64-unknown-linux-musl", 30);
+        fs::write(
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("install.lock"),
+            b"",
+        )
+        .unwrap();
+        fs::create_dir_all(
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("scratch"),
+        )
+        .unwrap();
+        symlink(
+            "releases/0.145.0-x86_64-unknown-linux-musl",
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("current"),
+        )
+        .unwrap();
+
+        let report = verify_at(directory.path());
+
+        assert!(has_warning(&report, "scratch"));
+        assert!(!has_warning(&report, "install.lock"));
+        assert_eq!(report.warning_count(), 1);
         assert_eq!(report.error_count(), 0);
     }
 
