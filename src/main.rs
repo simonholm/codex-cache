@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "codex-cache")]
-#[command(about = "Inspect the Codex CLI standalone release cache")]
+#[command(about = "Inspect, verify, and clean the Codex CLI standalone release cache")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -19,7 +19,7 @@ enum Command {
     Report,
     /// Verify the Codex standalone cache layout without modifying it.
     Verify,
-    /// Clean Codex standalone releases selected by the keep policy.
+    /// Delete inactive Codex standalone releases selected by the keep policy.
     Clean {
         /// Show what would be removed without deleting anything.
         #[arg(long)]
