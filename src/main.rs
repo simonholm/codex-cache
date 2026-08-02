@@ -19,7 +19,7 @@ enum Command {
     Report,
     /// Verify the Codex standalone cache layout without modifying it.
     Verify,
-    /// Plan Codex standalone release cleanup without deleting anything.
+    /// Clean Codex standalone releases selected by the keep policy.
     Clean {
         /// Show what would be removed without deleting anything.
         #[arg(long)]
@@ -51,12 +51,18 @@ fn main() -> Result<()> {
             print!("{}", codex_cache::render_verify(&report));
         }
         Command::Clean { dry_run, keep } => {
-            if !dry_run {
-                bail!("clean only supports planning; pass --dry-run");
+            if dry_run {
+                let scan = codex_cache::scan_default()?;
+                let plan =
+                    codex_cache::plan_deletions_in(&scan.releases_dir, &scan.releases, keep)?;
+                print!("{}", codex_cache::render_clean_dry_run(&plan));
+            } else {
+                let result = codex_cache::clean_default(keep)?;
+                print!("{}", codex_cache::render_clean_result(&result));
+                if result.has_failures() {
+                    bail!("one or more deletions failed");
+                }
             }
-            let scan = codex_cache::scan_default()?;
-            let plan = codex_cache::plan_deletions(&scan.releases, keep)?;
-            print!("{}", codex_cache::render_clean_dry_run(&plan));
         }
     }
 

@@ -38,11 +38,22 @@ pub enum KeepPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletionPlan {
     pub keep_policy: KeepPolicy,
+    pub releases_dir: PathBuf,
+    pub current_target: Option<PathBuf>,
     pub releases_to_remove: Vec<ReleaseInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecutionResult;
+pub struct CleanupResult {
+    pub deleted: Vec<ReleaseInfo>,
+    pub failures: Vec<CleanupFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupFailure {
+    pub release: ReleaseInfo,
+    pub message: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationReport {
@@ -112,6 +123,24 @@ impl DeletionPlan {
             .iter()
             .map(|release| release.size)
             .sum()
+    }
+}
+
+impl CleanupResult {
+    pub fn reclaimed_bytes(&self) -> u64 {
+        self.deleted.iter().map(|release| release.size).sum()
+    }
+
+    pub fn failed_count(&self) -> usize {
+        self.failures.len()
+    }
+
+    pub fn success_count(&self) -> usize {
+        self.deleted.len()
+    }
+
+    pub fn has_failures(&self) -> bool {
+        !self.failures.is_empty()
     }
 }
 
@@ -329,6 +358,19 @@ pub fn render_list(scan: &CacheScan) -> String {
 }
 
 pub fn plan_deletions(releases: &[ReleaseInfo], keep_policy: KeepPolicy) -> Result<DeletionPlan> {
+    let releases_dir = releases
+        .iter()
+        .filter_map(|release| release.path.parent())
+        .find(|path| !path.as_os_str().is_empty())
+        .map_or_else(PathBuf::new, Path::to_path_buf);
+    plan_deletions_in(&releases_dir, releases, keep_policy)
+}
+
+pub fn plan_deletions_in(
+    releases_dir: &Path,
+    releases: &[ReleaseInfo],
+    keep_policy: KeepPolicy,
+) -> Result<DeletionPlan> {
     let active = releases
         .iter()
         .find(|release| release.active)
@@ -350,12 +392,85 @@ pub fn plan_deletions(releases: &[ReleaseInfo], keep_policy: KeepPolicy) -> Resu
 
     Ok(DeletionPlan {
         keep_policy,
+        releases_dir: releases_dir.to_path_buf(),
+        current_target: Some(active.path.clone()),
         releases_to_remove,
     })
 }
 
-pub fn execute_deletion_plan(_plan: &DeletionPlan) -> Result<ExecutionResult> {
-    bail!("Deletion execution is not yet implemented.")
+pub fn clean_default(keep_policy: KeepPolicy) -> Result<CleanupResult> {
+    let codex_root = codex_root()?;
+    clean_at(&codex_root, keep_policy)
+}
+
+pub fn clean_at(codex_root: &Path, keep_policy: KeepPolicy) -> Result<CleanupResult> {
+    let verification = verify_at(codex_root);
+    if verification.error_count() > 0 {
+        bail!("verification failed; clean aborted");
+    }
+
+    let scan = scan_at(codex_root)?;
+    let plan = plan_deletions_in(&scan.releases_dir, &scan.releases, keep_policy)?;
+    Ok(execute_deletion_plan(&plan))
+}
+
+pub fn execute_deletion_plan(plan: &DeletionPlan) -> CleanupResult {
+    execute_deletion_plan_with(plan, |path| fs::remove_dir_all(path))
+}
+
+fn execute_deletion_plan_with<F>(plan: &DeletionPlan, mut remove_dir_all: F) -> CleanupResult
+where
+    F: FnMut(&Path) -> std::io::Result<()>,
+{
+    let mut deleted = Vec::new();
+    let mut failures = Vec::new();
+
+    for release in &plan.releases_to_remove {
+        if let Err(error) = validate_deletion_candidate(plan, release) {
+            failures.push(CleanupFailure {
+                release: release.clone(),
+                message: error.to_string(),
+            });
+            continue;
+        }
+
+        match remove_dir_all(&release.path) {
+            Ok(()) => deleted.push(release.clone()),
+            Err(error) => failures.push(CleanupFailure {
+                release: release.clone(),
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    CleanupResult { deleted, failures }
+}
+
+fn validate_deletion_candidate(plan: &DeletionPlan, release: &ReleaseInfo) -> Result<()> {
+    if release.active {
+        bail!("refusing to delete active release");
+    }
+
+    if plan
+        .current_target
+        .as_deref()
+        .is_some_and(|target| same_path(target, &release.path))
+    {
+        bail!("refusing to delete current symlink target");
+    }
+
+    if !path_is_inside(&release.path, &plan.releases_dir) {
+        bail!(
+            "refusing to delete path outside releases/: {}",
+            release.path.display()
+        );
+    }
+
+    if same_path(&release.path, &plan.releases_dir) {
+        bail!("refusing to delete releases/ directory itself");
+    }
+
+    Ok(())
 }
 
 pub fn render_clean_dry_run(plan: &DeletionPlan) -> String {
@@ -376,6 +491,42 @@ pub fn render_clean_dry_run(plan: &DeletionPlan) -> String {
         format_bytes(plan.reclaimed_bytes())
     ));
     output.push_str("Dry run: no files were deleted.\n");
+    output
+}
+
+pub fn render_clean_result(result: &CleanupResult) -> String {
+    let mut output = String::new();
+    output.push_str("Codex standalone cache clean\n");
+    output.push_str("Deleted:\n");
+    if result.deleted.is_empty() {
+        output.push_str("  none\n");
+    } else {
+        for release in &result.deleted {
+            output.push_str(&format!("  {}\n", release.path.display()));
+        }
+    }
+
+    if !result.failures.is_empty() {
+        output.push_str("Failed:\n");
+        for failure in &result.failures {
+            output.push_str(&format!(
+                "  {} ({})\n",
+                failure.release.path.display(),
+                failure.message
+            ));
+        }
+    }
+
+    output.push_str(&format!("Reclaimed bytes: {}\n", result.reclaimed_bytes()));
+    output.push_str(&format!(
+        "Reclaimed size: {}\n",
+        format_bytes(result.reclaimed_bytes())
+    ));
+    output.push_str(&format!(
+        "Successful deletions: {}\n",
+        result.success_count()
+    ));
+    output.push_str(&format!("Failed deletions: {}\n", result.failed_count()));
     output
 }
 
@@ -810,9 +961,10 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        KeepPolicy, VerificationStatus, execute_deletion_plan, format_bytes, plan_deletions,
-        render_clean_dry_run, render_list, render_report, render_scan, render_verify, scan_at,
-        verify_at,
+        KeepPolicy, VerificationStatus, clean_at, execute_deletion_plan,
+        execute_deletion_plan_with, format_bytes, plan_deletions, plan_deletions_in,
+        render_clean_dry_run, render_clean_result, render_list, render_report, render_scan,
+        render_verify, scan_at, verify_at,
     };
 
     #[test]
@@ -1036,8 +1188,63 @@ mod tests {
     }
 
     #[test]
-    fn execute_deletion_plan_is_stubbed() {
+    fn clean_deletes_selected_release_directories() {
         let directory = tempfile::tempdir().unwrap();
+        write_release(directory.path(), "0.144.5-x86_64-unknown-linux-musl", 20);
+        write_release(directory.path(), "0.145.0-x86_64-unknown-linux-musl", 30);
+        fs::write(
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("install.lock"),
+            b"",
+        )
+        .unwrap();
+        symlink(
+            "releases/0.145.0-x86_64-unknown-linux-musl",
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("current"),
+        )
+        .unwrap();
+
+        let result = clean_at(directory.path(), KeepPolicy::Current).unwrap();
+        let output = render_clean_result(&result);
+
+        assert_eq!(result.success_count(), 1);
+        assert_eq!(result.failed_count(), 0);
+        assert_eq!(result.reclaimed_bytes(), 20);
+        assert!(output.contains("Codex standalone cache clean\n"));
+        assert!(output.contains("Reclaimed bytes: 20\n"));
+        assert!(output.contains("Successful deletions: 1\n"));
+        assert!(output.contains("Failed deletions: 0\n"));
+        assert!(
+            !directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("releases")
+                .join("0.144.5-x86_64-unknown-linux-musl")
+                .exists()
+        );
+        assert!(
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("releases")
+                .join("0.145.0-x86_64-unknown-linux-musl")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn clean_reports_partial_deletion_failure_and_continues() {
+        let directory = tempfile::tempdir().unwrap();
+        write_release(directory.path(), "0.144.0-x86_64-unknown-linux-musl", 10);
         write_release(directory.path(), "0.144.5-x86_64-unknown-linux-musl", 20);
         write_release(directory.path(), "0.145.0-x86_64-unknown-linux-musl", 30);
         symlink(
@@ -1051,10 +1258,102 @@ mod tests {
         .unwrap();
 
         let scan = scan_at(directory.path()).unwrap();
-        let plan = plan_deletions(&scan.releases, KeepPolicy::Current).unwrap();
-        let error = execute_deletion_plan(&plan).unwrap_err().to_string();
+        let plan =
+            plan_deletions_in(&scan.releases_dir, &scan.releases, KeepPolicy::Current).unwrap();
+        let failing_release = "0.144.5-x86_64-unknown-linux-musl";
+        let result = execute_deletion_plan_with(&plan, |path| {
+            if path.file_name().unwrap() == failing_release {
+                Err(std::io::Error::other("simulated delete failure"))
+            } else {
+                fs::remove_dir_all(path)
+            }
+        });
+        let output = render_clean_result(&result);
 
-        assert_eq!(error, "Deletion execution is not yet implemented.");
+        assert_eq!(result.success_count(), 1);
+        assert_eq!(result.failed_count(), 1);
+        assert_eq!(result.reclaimed_bytes(), 10);
+        assert!(output.contains("Failed:\n"));
+        assert!(output.contains("simulated delete failure"));
+        assert!(output.contains("Successful deletions: 1\n"));
+        assert!(output.contains("Failed deletions: 1\n"));
+        assert!(
+            !directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("releases")
+                .join("0.144.0-x86_64-unknown-linux-musl")
+                .exists()
+        );
+        assert!(
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("releases")
+                .join("0.144.5-x86_64-unknown-linux-musl")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn clean_aborts_when_current_symlink_is_invalid() {
+        let directory = tempfile::tempdir().unwrap();
+        write_release(directory.path(), "0.145.0-x86_64-unknown-linux-musl", 30);
+        symlink(
+            "releases/9.999.9-x86_64-unknown-linux-musl",
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("current"),
+        )
+        .unwrap();
+
+        let error = clean_at(directory.path(), KeepPolicy::Current)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(error, "verification failed; clean aborted");
+        assert!(
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("releases")
+                .join("0.145.0-x86_64-unknown-linux-musl")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn execute_deletion_plan_refuses_paths_outside_releases() {
+        let directory = tempfile::tempdir().unwrap();
+        write_release(directory.path(), "0.144.5-x86_64-unknown-linux-musl", 20);
+        write_release(directory.path(), "0.145.0-x86_64-unknown-linux-musl", 30);
+        symlink(
+            "releases/0.145.0-x86_64-unknown-linux-musl",
+            directory
+                .path()
+                .join("packages")
+                .join("standalone")
+                .join("current"),
+        )
+        .unwrap();
+        let scan = scan_at(directory.path()).unwrap();
+        let outside = directory.path().join("outside-release");
+        fs::create_dir_all(&outside).unwrap();
+        let mut plan =
+            plan_deletions_in(&scan.releases_dir, &scan.releases, KeepPolicy::Current).unwrap();
+        plan.releases_to_remove[0].path = outside.clone();
+
+        let result = execute_deletion_plan(&plan);
+
+        assert_eq!(result.success_count(), 0);
+        assert_eq!(result.failed_count(), 1);
+        assert!(result.failures[0].message.contains("outside releases/"));
+        assert!(outside.exists());
     }
 
     #[test]
