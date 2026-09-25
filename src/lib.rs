@@ -7,7 +7,8 @@ use std::str::FromStr;
 use anyhow::{Context, Result, anyhow, bail};
 
 const PACKAGES: &[&str] = &["standalone", "app-server-daemon"];
-const EXPECTED_PACKAGE_ROOT_ENTRIES: &[&str] = &["current", "releases", "install.lock"];
+const EXPECTED_PACKAGE_ROOT_ENTRIES: &[&str] =
+    &["current", "releases", "install.lock", "auto-update-version"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheScan {
@@ -1552,6 +1553,29 @@ mod tests {
         assert!(output.contains("PASS    standalone: active release appears exactly once"));
         assert!(output.contains("Summary:"));
         assert!(output.contains("0 ERROR"));
+    }
+
+    #[test]
+    fn verify_accepts_auto_update_version_in_both_package_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        for package in ["standalone", "app-server-daemon"] {
+            write_package_release(directory.path(), package, "0.145.0", 30);
+            link_current(directory.path(), package, "0.145.0");
+            fs::write(
+                directory
+                    .path()
+                    .join("packages")
+                    .join(package)
+                    .join("auto-update-version"),
+                b"0.145.0",
+            )
+            .unwrap();
+        }
+
+        let report = verify_at(directory.path());
+
+        assert_eq!(report.warning_count(), 0);
+        assert_eq!(report.error_count(), 0);
     }
 
     #[test]
