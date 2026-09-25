@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "codex-cache")]
-#[command(about = "Inspect, verify, and clean the Codex CLI standalone release cache")]
+#[command(about = "Inspect, verify, and clean Codex release caches")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -13,13 +13,13 @@ struct Cli {
 enum Command {
     /// Show a compact release table.
     List,
-    /// Show detected Codex standalone releases and paths.
+    /// Show detected Codex releases and paths.
     Scan,
     /// Show size totals and retention estimates.
     Report,
-    /// Verify the Codex standalone cache layout without modifying it.
+    /// Verify Codex package cache layouts without modifying them.
     Verify,
-    /// Delete inactive Codex standalone releases selected by the keep policy.
+    /// Delete inactive Codex releases selected by the keep policy.
     Clean {
         /// Show what would be removed without deleting anything.
         #[arg(long)]
@@ -53,9 +53,8 @@ fn main() -> Result<()> {
         Command::Clean { dry_run, keep } => {
             if dry_run {
                 let scan = codex_cache::scan_default()?;
-                let plan =
-                    codex_cache::plan_deletions_in(&scan.releases_dir, &scan.releases, keep)?;
-                print!("{}", codex_cache::render_clean_dry_run(&plan));
+                let plans = codex_cache::plan_scan_deletions(&scan, keep)?;
+                print!("{}", codex_cache::render_clean_dry_runs(&plans));
             } else {
                 let result = codex_cache::clean_default(keep)?;
                 print!("{}", codex_cache::render_clean_result(&result));

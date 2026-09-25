@@ -1,17 +1,18 @@
 # codex-cache
 
-Inspect, verify, and safely clean the Codex standalone release cache.
+Inspect, verify, and safely clean Codex release caches.
 
-Codex standalone installs are kept under
-`$CODEX_HOME/packages/standalone/releases` or
-`$HOME/.codex/packages/standalone/releases`. Over time, inactive releases can
-accumulate and use several GiB of disk space. `codex-cache` reports the
-installed releases, validates the cache layout, and can delete inactive release
-directories while preserving the active installation.
+Codex keeps releases in two package stores under `$CODEX_HOME/packages` (or
+`$HOME/.codex/packages`): `standalone/releases` and
+`app-server-daemon/releases`. Each package has its own `current` symlink.
+Over time, inactive releases can accumulate and use several GiB of disk space.
+`codex-cache` reports installed releases, validates each package layout, and
+can delete inactive release directories while preserving each active release.
+An absent package store is skipped when the other is present.
 
 ## Features
 
-- `scan` — inspect the installed standalone cache
+- `scan` — inspect the installed package caches
 - `report` — summarize versions, cache size, and reclaim estimates
 - `list` — list installed releases and their sizes
 - `verify` — validate the cache layout and detect inconsistencies
@@ -20,19 +21,19 @@ directories while preserving the active installation.
 
 ## Safety
 
-Cleanup is conservative and bounded to the Codex standalone release cache:
+Cleanup is conservative and bounded to these two Codex release caches:
 
 - verification runs before real deletion, and cleanup aborts if verification
   fails
-- the active release and the `current` symlink target are always protected
-- deletion candidates must be inside the `releases/` directory
+- each package's active release and `current` symlink target are protected
+- deletion candidates must be inside their package's `releases/` directory
 - `clean --dry-run` shows the exact directories and bytes before anything is
   removed
 
-The keep policy controls which releases remain:
+The keep policy applies independently to each package:
 
-- `current` keeps only the active release and removes all inactive releases
-- `current,previous` keeps the active release plus the newest inactive release
+- `current` keeps only each active release and removes inactive releases
+- `current,previous` keeps each active release plus its newest inactive release
 
 ## Build
 
